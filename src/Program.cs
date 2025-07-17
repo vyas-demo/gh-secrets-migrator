@@ -96,52 +96,49 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - name: Install Crypto Package
-        run: |
-          Install-Package -Name Sodium.Core -ProviderName NuGet -Scope CurrentUser -RequiredVersion 1.3.0 -Destination . -Force
-        shell: pwsh
       - name: Migrate Secrets
+        # Use the pre-installed GitHub CLI (gh) to migrate secrets.
+        # This is more reliable than installing custom crypto packages.
         run: |
-          $sodiumPath = Resolve-Path "".\Sodium.Core.1.3.0\lib\\netstandard2.1\Sodium.Core.dll""
-          [System.Reflection.Assembly]::LoadFrom($sodiumPath)
-
-          $targetPat = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("":$($env:TARGET_PAT)""))
-          $publicKeyResponse = Invoke-RestMethod -Uri ""https://api.github.com/repos/$env:TARGET_ORG/$env:TARGET_REPO/actions/secrets/public-key"" -Method ""GET"" -Headers @{{ Authorization = ""Basic $targetPat"" }}
-          $publicKey = [Convert]::FromBase64String($publicKeyResponse.key)
-          $publicKeyId = $publicKeyResponse.key_id
-              
+          $targetRepo = ""${{{{ env.TARGET_ORG }}}}/${{{{ env.TARGET_REPO }}}}""
+          
+          # Convert the secrets JSON into a PowerShell object
           $secrets = $env:REPO_SECRETS | ConvertFrom-Json
-          $secrets | Get-Member -MemberType NoteProperty | ForEach-Object {{
+          
+          # Loop through each secret property in the object
+          $secrets.psobject.properties | ForEach-Object {{
             $secretName = $_.Name
-            $secretValue = $secrets.""$secretName""
-     
+            $secretValue = $_.Value
+            
+            # Skip the special tokens used by the workflow itself
             if ($secretName -ne ""github_token"" -and $secretName -ne ""SECRETS_MIGRATOR_PAT"") {{
-              Write-Output ""Migrating Secret: $secretName""
-              $secretBytes = [Text.Encoding]::UTF8.GetBytes($secretValue)
-              $sealedPublicKeyBox = [Sodium.SealedPublicKeyBox]::Create($secretBytes, $publicKey)
-              $encryptedSecret = [Convert]::ToBase64String($sealedPublicKeyBox)
-                 
-              $Params = @{{
-                Uri = ""https://api.github.com/repos/$env:TARGET_ORG/$env:TARGET_REPO/actions/secrets/$secretName""
-                Headers = @{{
-                  Authorization = ""Basic $targetPat""
-                }}
-                Method = ""PUT""
-                Body = ""{{ `""encrypted_value`"": `""$encryptedSecret`"", `""key_id`"": `""$publicKeyId`"" }}""
-              }}
-
-              $createSecretResponse = Invoke-RestMethod @Params
+              Write-Output ""Migrating Secret: $secretName to $targetRepo""
+              
+              # Use gh secret set. It handles fetching the public key and encryption automatically.
+              # We pipe the secret value to the command to avoid it appearing in logs.
+              $secretValue | gh secret set $secretName --repo $targetRepo
             }}
           }}
-
-          Write-Output ""Cleaning up...""
-          Invoke-RestMethod -Uri ""https://api.github.com/repos/${{{{ github.repository }}}}/git/${{{{ github.ref }}}}"" -Method ""DELETE"" -Headers @{{ Authorization = ""Basic $targetPat"" }}
-          Invoke-RestMethod -Uri ""https://api.github.com/repos/${{{{ github.repository }}}}/actions/secrets/SECRETS_MIGRATOR_PAT"" -Method ""DELETE"" -Headers @{{ Authorization = ""Basic $targetPat"" }}
         env:
+          # The GitHub CLI uses the GH_TOKEN environment variable for authentication.
+          # We assign the Personal Access Token (PAT) from your secrets to it.
+          GH_TOKEN: ${{{{ secrets.SECRETS_MIGRATOR_PAT }}}}
           REPO_SECRETS: ${{{{ toJSON(secrets) }}}}
-          TARGET_PAT: ${{{{ secrets.SECRETS_MIGRATOR_PAT }}}}
           TARGET_ORG: '{targetOrg}'
           TARGET_REPO: '{targetRepo}'
+        shell: pwsh
+
+      - name: Clean up temporary branch and secret
+        # Use 'continue-on-error' in case the branch is already protected or deleted.
+        continue-on-error: true
+        run: |
+          Write-Output ""Deleting migration branch...""
+          gh api ""repos/${{{{ github.repository }}}}/git/refs/heads/{branchName}"" -X DELETE
+
+          Write-Output ""Deleting secrets migrator PAT from source repository...""
+          gh secret delete SECRETS_MIGRATOR_PAT --repo ${{{{ github.repository }}}}
+        env:
+          GH_TOKEN: ${{{{ secrets.SECRETS_MIGRATOR_PAT }}}}
         shell: pwsh
 ";
 
