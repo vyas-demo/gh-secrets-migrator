@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            artifact_name: gh-secrets-migrator-linux-amd64
+          - os: windows-latest
+            rid: win-x64
+            artifact_name: gh-secrets-migrator-windows-amd64.exe
+          - os: macos-latest
+            rid: osx-x64
+            artifact_name: gh-secrets-migrator-darwin-amd64
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+    
+    - name: Publish
+      run: |
+        dotnet publish src/gh-secrets-migrator.csproj -c Release -r ${{ matrix.rid }} --self-contained -p:PublishSingleFile=true -p:PublishTrimmed=true -o ./publish
+    
+    - name: Rename executable
+      shell: bash
+      run: |
+        if [ "${{ matrix.os }}" == "windows-latest" ]; then
+          mv ./publish/gh-secrets-migrator.exe ./publish/${{ matrix.artifact_name }}
+        else
+          mv ./publish/gh-secrets-migrator ./publish/${{ matrix.artifact_name }}
+        fi
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact_name }}
+        path: ./publish/${{ matrix.artifact_name }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          gh-secrets-migrator-linux-amd64/gh-secrets-migrator-linux-amd64
+          gh-secrets-migrator-windows-amd64.exe/gh-secrets-migrator-windows-amd64.exe
+          gh-secrets-migrator-darwin-amd64/gh-secrets-migrator-darwin-amd64
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
